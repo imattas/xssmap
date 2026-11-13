@@ -46,6 +46,9 @@ class Response:
     request_body: bytes = b""
     history: list[Hop] = field(default_factory=list)
     error: str | None = None
+    # Binary bodies (images, fonts, archives, media) are read up to a cap and
+    # the connection is dropped: nothing downstream parses them.
+    truncated: bool = False
 
     # -- convenience -------------------------------------------------
     @property
@@ -158,6 +161,43 @@ class Request:
 
 MAX_RETRY_AFTER = 120.0  # never honour a server hold longer than two minutes
 
+# Cap on non-textual bodies. Enough to sniff a mislabelled HTML page, small
+# enough that a 40 MB video does not become part of the crawl.
+MAX_BINARY_BODY = 262_144
+
+# Content types whose bodies are parsed by some later stage (context analysis,
+# DOM taint, endpoint mining) and therefore must be read in full.
+TEXTUAL_TYPES = frozenset({
+    "application/xhtml+xml", "application/xml", "application/json",
+    "application/ld+json", "application/javascript", "application/ecmascript",
+    "application/x-javascript", "application/x-www-form-urlencoded",
+    "application/manifest+json", "application/rss+xml", "application/atom+xml",
+    "image/svg+xml",
+})
+
+
+def _is_textual(headers) -> bool:
+    """True when a response body may contain markup or code worth reading."""
+    ctype = ""
+    for k, v in headers or []:
+        if str(k).lower() == "content-type":
+            ctype = str(v).split(";")[0].strip().lower()
+            break
+    if not ctype:
+        return True          # no type: sniff it, the body is usually HTML
+    if ctype.startswith("text/"):
+        return True
+    return ctype in TEXTUAL_TYPES or ctype.endswith(("+xml", "+json"))
+
+# Statuses that mean "you are sending too much": these justify slowing every
+# worker down. A 500 is an application error - a scanner trips them constantly on
+# malformed parameters - so it must not be read as backpressure, and neither must
+# a one-off 503 from a flapping worker. Pacing only grows after a short streak.
+LOAD_SIGNALS = (429, 503)
+UPSTREAM_ERRORS = (502, 504)
+SLOW_AFTER = 2
+MAX_ADAPTIVE_DELAY = 3.0
+
 
 def parse_retry_after(value: str | None) -> float | None:
     """Seconds requested by a Retry-After header (delta or HTTP-date).
@@ -236,13 +276,24 @@ class Throttle:
 
     def on_status(self, status: int) -> None:
         with self.lock:
-            if status in (429, 503, 500, 502, 504):
+            if status in LOAD_SIGNALS:
                 self.consecutive_errors += 1
-                self.delay = min(max(self.delay * 1.6, 0.4), 8.0)
+                if self.consecutive_errors >= SLOW_AFTER:
+                    self.delay = min(max(self.delay * 2.0, 0.35), MAX_ADAPTIVE_DELAY)
+            elif status in UPSTREAM_ERRORS:
+                # A gateway that cannot reach its backend is a hint, not a verdict.
+                self.delay = min(max(self.delay, 0.15), 1.5)
+            elif status >= 500:
+                # Application errors (500, 501, 505): neutral. Slowing down here
+                # punished a target for rejecting one payload and stalled the
+                # rest of the crawl behind a delay it never asked for.
+                return
             else:
                 self.consecutive_errors = max(0, self.consecutive_errors - 1)
-                if self.consecutive_errors == 0:
-                    self.delay = max(self.base_delay, self.delay * 0.85)
+                if self.delay > self.base_delay:
+                    # Recover quickly: a scan that took one 429 should not keep
+                    # paying for it for the next fifty requests.
+                    self.delay = max(self.base_delay, self.delay * 0.6)
 
     def on_response(self, status: int, headers) -> float | None:
         """Record a response and return the server-requested hold in seconds.
@@ -401,12 +452,15 @@ class HTTP:
     def _get_conn(self, scheme: str, host: str, port: int, use_tunnel: bool):
         key = f"{scheme}://{host}:{port}:{int(use_tunnel)}"
         pool = self._pool()
-        while pool:
-            k, conn, last_used = pool.pop()
+        # Search the whole pool instead of popping: a request for another host
+        # used to throw away every warm connection queued ahead of it, so a
+        # crawl that touched a CDN lost its keep-alive sockets and re-handshook.
+        for index in range(len(pool) - 1, -1, -1):
+            k, conn, last_used = pool[index]
             if k != key:
                 continue
-            idle = time.time() - last_used
-            if idle > 45:
+            del pool[index]
+            if time.time() - last_used > 45:
                 try:
                     conn.close()
                 except Exception:
@@ -575,11 +629,28 @@ class HTTP:
                 conn, key = self._get_conn(parsed.scheme, host, port, use_tunnel)
                 conn.request(req.method, path, body=req.body, headers=dict(headers))
                 raw_resp = conn.getresponse()
-                raw = raw_resp.read()
                 raw_resp_headers = raw_resp.getheaders()
+                truncated = False
+                if _is_textual(raw_resp_headers):
+                    raw = raw_resp.read()
+                else:
+                    # A crawler that downloads every PDF, font and video in full
+                    # spends its whole budget on bytes no stage ever reads.
+                    raw = raw_resp.read(MAX_BINARY_BODY)
+                    # http.client closes the response only once it drained the
+                    # body; anything still open has bytes left on the socket.
+                    truncated = not raw_resp.isclosed()
                 data = self._decode_body(raw_resp, raw)
                 elapsed = time.monotonic() - started
-                self._release(conn, key)
+                if truncated:
+                    # The rest of the body is still on the wire: the socket
+                    # cannot go back to the pool.
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                else:
+                    self._release(conn, key)
                 self.stats["requests"] += 1
                 self.stats["bytes"] += len(raw)
                 hold = self.throttle.on_response(raw_resp.status, raw_resp_headers)
@@ -589,6 +660,7 @@ class HTTP:
                     url=req.url, method=req.method, status=raw_resp.status,
                     headers=raw_resp_headers, body=data, elapsed=elapsed,
                     request_headers=headers, request_body=req.body or b"",
+                    truncated=truncated,
                 )
                 if self.debug:
                     print(f"    [{resp.status}] {req.method} {req.url[:140]} ({len(data)}b {elapsed*1000:.0f}ms)")
@@ -609,7 +681,9 @@ class HTTP:
                     except Exception:
                         pass
                 self.stats["errors"] += 1
-                self.throttle.on_status(503)
+                # A slow page is not backpressure: the per-request retry below
+                # already backs off, and slowing every other worker would only
+                # make the whole scan wait for one unresponsive host.
             except (ConnectionError, http.client.HTTPException, OSError, ssl.SSLError) as exc:
                 last_err = exc
                 if conn:

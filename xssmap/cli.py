@@ -18,6 +18,7 @@ from . import report as rp
 from . import sarif
 from . import state as stateio
 from . import subdomains as subs
+from . import tech as techmod
 from . import waf as wafmod
 from .browser import BrowserVerifier
 from .callback import CallbackListener
@@ -723,6 +724,7 @@ def main(argv=None) -> int:
     brute_reports: list[dict] = []
     discoveries: list[dict] = []
     libs_found: list = []
+    server_tech: list = []
     waf_results: dict[str, wafmod.WAFDetection] = {}
     evasion_notes: dict[str, str] = {}
     fuzz_summary = None
@@ -824,6 +826,17 @@ def main(argv=None) -> int:
             if crawl_result.errors:
                 log.warn(f"{len(crawl_result.errors)} request(s) failed during crawl "
                          f"(first: {crawl_result.errors[0][1][:90]})")
+            # Server-stack pass: it reads the seed response the crawl already
+            # received, so it costs no extra request. An outdated version is a
+            # lead for the operator, never a finding on its own.
+            if crawl_result.root_headers:
+                server_tech = techmod.detect(crawl_result.root_headers,
+                                             crawl_result.generator)
+                for entry in server_tech:
+                    if entry.status == "detected":
+                        log.info(entry.line())
+                    else:
+                        log.warn(entry.line())
         else:
             log.info("crawling disabled")
 
@@ -1291,6 +1304,10 @@ def main(argv=None) -> int:
         meta["js_libraries"] = [lib.as_dict() for lib in lib_list]
         meta["js_library_summary"] = {
             k: v for k, v in jslibmod.summary(lib_list).items() if k != "libraries"}
+    if server_tech:
+        meta["server_stack"] = techmod.rows(server_tech)
+        meta["server_stack_summary"] = {
+            k: v for k, v in techmod.summary(server_tech).items() if v}
     if discoveries:
         meta["discovered_parameters"] = discoveries
     if fuzz_summary is not None:

@@ -8,6 +8,45 @@ Releases before 2.8.0 predate this file; their history is in the git log.
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-13
+
+### Added
+
+- Server-stack fingerprinting. `Server`, `X-Powered-By`, `X-AspNet-Version`,
+  `X-Generator`, `<meta name="generator">` and session cookie names are read
+  from the seed response the crawl already fetched, so the pass sends no extra
+  request. Rows are printed in the console and rendered in the Markdown and
+  HTML reports under "Server stack".
+- Outdated-version detection for components that advertise a version, using a
+  deliberately short policy table: Apache 2.4.49/2.4.50 (CVE-2021-41773,
+  CVE-2021-42013), nginx before 1.20.1 (CVE-2021-23017), PHP branches before
+  8.2 (out of security support) and IIS 6.0-8.5 (shipped only with an
+  end-of-life Windows Server). A flagged version is a lead for the operator,
+  never a finding on its own.
+- 35 tests pinning the new crawl scheduling, the transport cap, the throttle
+  rules and the stack policy table.
+
+### Changed
+
+- Crawl scheduling is continuous instead of level-by-level. `--depth` counts
+  hops from the seed and `--max-pages` is a hard stop, so one slow branch no
+  longer holds back pages that are already queued behind it.
+- `robots.txt` and `sitemap.xml` are fetched concurrently, turning two round
+  trips into one.
+- `Throttle` no longer reads an HTTP 500 as backpressure. An application error
+  is not load, so only 429/503 count, and only after a short streak; a target
+  that answers a fraction of URLs with 500 used to stack seconds of sleep into
+  the crawl and dominate its duration.
+- Binary bodies are read up to a 256 KB cap and marked truncated instead of
+  being buffered whole. A truncated body drops its connection rather than
+  returning a half-drained socket to the pool.
+
+### Fixed
+
+- Crawling a target that 500s part of its URL space is ~24x faster at the same
+  page count: 18.90 s to 0.79 s for 68 requests in the bundled benchmark
+  (identical page sets, deterministic error injection).
+
 ## [2.8.1] - 2026-11-13
 
 Packaging release. No scanner behaviour changed.

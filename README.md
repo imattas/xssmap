@@ -34,6 +34,12 @@ actually execute in a real browser.
   friends from body or filename, compares versions against each advisory's affected range
   (so 2.3.2 is not blamed for a 3.4.1 fix) and can merge fresh advisories from osv.dev
   with `--osv`.
+- **Server stack and outdated versions.** Reads what each host says about itself - `Server`,
+  `X-Powered-By`, `X-AspNet-Version`, `X-Generator`, `<meta name="generator">` and session
+  cookie names - from the seed response the crawl already received, so the pass costs no
+  extra request. Versions whose exact build is known-vulnerable or out of support (Apache
+  2.4.49/2.4.50, nginx before 1.20.1, PHP before 8.2, IIS 6.0-8.5) are flagged with the
+  CVE, and every row names the header it came from.
 - **Leads, not silence.** A parameter that reflects but swallows every payload is recorded
   as an unconfirmed lead with the measured filter and how much of the probe survived
   (verbatim, recased, escaped, truncated), in its own report section - never presented as a
@@ -458,6 +464,28 @@ OSV enrichment is verified against the live service, not only against fixtures. 
 (`max_lookups=3`, 0.64 s) merged advisories for jQuery 1.8.3 (5 CVEs), Bootstrap 3.3.7 (7)
 and Lodash 4.17.4 (9) into the local verdicts, then stopped: the fourth library was never
 queried and stayed unchanged, so the cap is visibly enforced.
+
+### Server stack and outdated versions
+
+The headers a host sends are also an inventory: `Server: nginx/1.18.0` is a version, not
+just a name. The crawler keeps the headers and the `<meta name="generator">` value of the
+first HTML response it already fetched, and the stack pass reads them without a second
+request. Three things make the result usable rather than noisy:
+
+- A row always cites its evidence (`Server`, `X-Powered-By`, `X-AspNet-Version`,
+  `X-Generator`, `meta generator`, or `cookie <name>`), so a claim can be checked against
+  the response that produced it.
+- Versions are compared numerically, so nginx 1.20.10 is newer than 1.20.9 and is not
+  blamed for a fix that shipped in 1.20.1, and the IIS rules match `8.5` without also
+  matching `10.0`.
+- The policy table only holds issues that are public, fixed and cheap to verify: Apache
+  2.4.49/2.4.50 (CVE-2021-41773, CVE-2021-42013), nginx before 1.20.1 (CVE-2021-23017),
+  PHP branches before 8.2 (out of security support) and IIS 6.0-8.5 (shipped only with an
+  end-of-life Windows Server). A CMS such as WordPress is reported with its disclosed
+  version and no end-of-life claim, because that judgement is not the scanner's to make.
+
+A flagged version is a lead: it says the build has a published problem, not that this
+host is exploitable through it. The finding standard for XSS is unchanged.
 
 ### Browser cost
 

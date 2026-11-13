@@ -400,8 +400,9 @@ def _md(text: str) -> str:
 # what makes a clean result meaningful, so they get their own report section.
 # ---------------------------------------------------------------------------
 
-RECON_SUMMARY_KEYS = ("waf", "js_libraries", "discovered_parameters",
-                      "fuzzed_parameters", "brute_force", "leads")
+RECON_SUMMARY_KEYS = ("waf", "js_libraries", "server_stack",
+                      "discovered_parameters", "fuzzed_parameters", "brute_force",
+                      "leads")
 
 
 def _waf_rows(meta: dict) -> list[dict]:
@@ -466,11 +467,12 @@ def recon_markdown(meta: dict) -> list[str]:
     """Markdown lines for the reconnaissance stages ([] when none ran)."""
     waf_rows = _waf_rows(meta)
     libs = [lib for lib in (meta.get("js_libraries") or []) if isinstance(lib, dict)]
+    stack = [t for t in (meta.get("server_stack") or []) if isinstance(t, dict)]
     discoveries = [d for d in (meta.get("discovered_parameters") or [])
                    if isinstance(d, dict)]
     fuzzed = [p for p in (meta.get("fuzzed_parameters") or []) if isinstance(p, dict)]
     brute = [b for b in (meta.get("brute_force") or []) if isinstance(b, dict)]
-    if not any((waf_rows, libs, discoveries, fuzzed, brute)):
+    if not any((waf_rows, libs, stack, discoveries, fuzzed, brute)):
         return []
 
     out = ["## Reconnaissance\n"]
@@ -508,6 +510,24 @@ def recon_markdown(meta: dict) -> list[str]:
                 continue
             out.append(f"- **{lib.get('name')} {lib.get('version')}** — {lib.get('detail')} "
                        f"(fixed in {lib.get('fixed_in')}); evidence: `{lib.get('evidence')}`")
+        out.append("")
+
+    if stack:
+        out.append("### Server stack\n")
+        out.append("| Component | Version | Status | CVEs | Evidence |")
+        out.append("|---|---|---|---|---|")
+        for row in stack:
+            cves = _md(", ".join(row.get("cves") or []) or "-")
+            out.append(f"| {_md(str(row.get('name')))} | "
+                       f"{_md(str(row.get('version') or '-'))} | "
+                       f"{_md(str(row.get('status') or 'detected'))} | {cves} | "
+                       f"{_md(str(row.get('source') or ''))} |")
+        out.append("")
+        for row in stack:
+            if row.get("status") == "detected" or not row.get("detail"):
+                continue
+            version = f" {row.get('version')}" if row.get("version") else ""
+            out.append(f"- **{row.get('name')}{version}** — {row.get('detail')}")
         out.append("")
 
     if discoveries:
@@ -593,11 +613,12 @@ def recon_html(meta: dict) -> str:
     esc = lambda value: html.escape(str(value))
     waf_rows = _waf_rows(meta)
     libs = [lib for lib in (meta.get("js_libraries") or []) if isinstance(lib, dict)]
+    stack = [t for t in (meta.get("server_stack") or []) if isinstance(t, dict)]
     discoveries = [d for d in (meta.get("discovered_parameters") or [])
                    if isinstance(d, dict)]
     fuzzed = [p for p in (meta.get("fuzzed_parameters") or []) if isinstance(p, dict)]
     brute = [b for b in (meta.get("brute_force") or []) if isinstance(b, dict)]
-    if not any((waf_rows, libs, discoveries, fuzzed, brute)):
+    if not any((waf_rows, libs, stack, discoveries, fuzzed, brute)):
         return ""
 
     parts = ["<h2>Reconnaissance</h2>"]
@@ -636,6 +657,21 @@ def recon_html(meta: dict) -> str:
                 f"<li><strong>{esc(lib.get('name'))} {esc(lib.get('version'))}</strong> — "
                 f"{esc(lib.get('detail'))} (fixed in {esc(lib.get('fixed_in'))})</li>"
                 for lib in vulnerable) + "</ul>")
+
+    if stack:
+        rows = [[esc(row.get("name")), esc(row.get("version") or "-"),
+                 esc(row.get("status") or "detected"),
+                 esc(", ".join(row.get("cves") or []) or "-"),
+                 f"<code>{esc(row.get('source', ''))}</code>"] for row in stack]
+        parts.append("<h3>Server stack</h3>")
+        parts.append(_recon_table(
+            ["Component", "Version", "Status", "CVEs", "Evidence"], rows))
+        flagged = [row for row in stack
+                   if row.get("status") != "detected" and row.get("detail")]
+        if flagged:
+            parts.append("<ul>" + "".join(
+                f"<li><strong>{esc(row.get('name'))} {esc(row.get('version'))}</strong> — "
+                f"{esc(row.get('detail'))}</li>" for row in flagged) + "</ul>")
 
     if discoveries:
         items = []

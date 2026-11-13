@@ -14,7 +14,8 @@ import re
 import threading
 import urllib.parse
 import urllib.robotparser
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 
 from .htmlparse import (
@@ -94,6 +95,11 @@ class CrawlResult:
     sitemap_urls: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     skipped_scope: int = 0
+    #: Headers of the first HTML response. The server-stack pass reads them so
+    #: it does not have to send a second request the target already answered.
+    root_headers: list[tuple[str, str]] = field(default_factory=list)
+    #: Content of <meta name="generator"> on the seed page, if it has one.
+    generator: str = ""
 
 
 def normalize_url(url: str) -> str:
@@ -202,37 +208,49 @@ class Crawler:
 
     # -- entry -------------------------------------------------------
     def run(self, seeds: list[str]) -> CrawlResult:
+        """Crawl from ``seeds`` with a continuously fed worker pool.
+
+        The queue is fed as results arrive instead of level by level. A level
+        barrier idles every worker until the slowest page of that level answers,
+        which on a 150-page site with one slow page per level costs more than the
+        crawl itself. Depth is carried per URL (the seed is depth 0, so
+        ``max_depth`` still means hops from the seed) and children are only
+        queued while ``depth < max_depth``.
+        """
         seeds = [normalize_url(u) for u in seeds if self.scope.allows(u)]
         self._collect_robots(seeds[0] if seeds else "")
         self._add_seed_urls(seeds)
-        frontier = list(seeds)
-        depth = 0
-        while frontier and self._fetched < self.max_pages:
-            depth += 1
-            self.log.info(f"  crawl level {depth}: {len(frontier)} url(s) queued "
-                          f"({self._fetched}/{self.max_pages} pages fetched)")
-            next_frontier: list[str] = []
-            with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
-                futures = {}
-                for url in frontier:
-                    if self._fetched >= self.max_pages:
-                        break
+        pending: deque[tuple[str, int]] = deque((u, 0) for u in seeds)
+        self.log.info(f"  crawl start: {len(pending)} seed(s), depth {self.max_depth}, "
+                      f"{self.concurrency} worker(s), max {self.max_pages} page(s)")
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            futures: dict = {}
+            while pending or futures:
+                # Keep every worker busy: refill as soon as a slot frees up.
+                while pending and len(futures) < self.concurrency * 2 \
+                        and self._fetched < self.max_pages:
+                    url, depth = pending.popleft()
                     if url in self._seen:
                         continue
                     self._seen.add(url)
                     self._fetched += 1
-                    futures[pool.submit(self._fetch_and_parse, url, depth)] = url
-                for fut in as_completed(futures):
+                    futures[pool.submit(self._fetch_and_parse, url, depth)] = (url, depth)
+                if not futures:
+                    if pending:
+                        self.log.info(f"  page budget {self.max_pages} reached")
+                    break
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for fut in done:
+                    url, depth = futures.pop(fut)
                     try:
                         found = fut.result()
                     except Exception as exc:  # keep crawling on individual failures
-                        self.result.errors.append((futures[fut], str(exc)))
+                        self.result.errors.append((url, str(exc)))
                         continue
-                    next_frontier.extend(found)
-            frontier = next_frontier
-            if depth > self.max_depth:
-                self.log.info(f"  depth limit {self.max_depth} reached, stopping crawl")
-                break
+                    if depth < self.max_depth:
+                        pending.extend((u, depth + 1) for u in found if u not in self._seen)
+        self.log.info(f"  crawl stopped: {self._fetched} page(s) fetched, "
+                      f"{len(self.result.errors)} error(s)")
         self._crawl_js_bundles()
         self._finish_param_urls()
         return self.result
@@ -246,8 +264,13 @@ class Crawler:
             return
         parts = urllib.parse.urlsplit(base)
         root = f"{parts.scheme}://{parts.netloc}"
+        # Both probes are on the critical path before the first page is fetched,
+        # so ask for them at the same time instead of paying two round trips.
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            f_robots = pool.submit(self.http.get, root + "/robots.txt", self.headers)
+            f_map = pool.submit(self.http.get, root + "/sitemap.xml", self.headers)
         try:
-            resp = self.http.get(root + "/robots.txt", headers=self.headers)
+            resp = f_robots.result()
             if resp.status == 200 and "html" not in (resp.content_type or ""):
                 text = resp.text
                 rp = urllib.robotparser.RobotFileParser()
@@ -256,7 +279,10 @@ class Crawler:
                 sitemaps = re.findall(r"(?im)^\s*sitemap:\s*(\S+)", text)
                 for sm in sitemaps[:5]:
                     self._ingest_sitemap(sm)
-            resp = self.http.get(root + "/sitemap.xml", headers=self.headers)
+        except Exception:
+            pass
+        try:
+            resp = f_map.result()
             if resp.status == 200 and ("xml" in (resp.content_type or "") or resp.text.lstrip().startswith("<?xml")):
                 self._ingest_sitemap_xml(resp.text)
         except Exception:
@@ -318,6 +344,10 @@ class Crawler:
 
         if resp.is_html:
             page = parse_page(final_url, resp.text)
+            with self._lock:
+                if not self.result.root_headers:
+                    self.result.root_headers = list(getattr(resp, "headers", None) or [])
+                    self.result.generator = _generator_of(page)
             found.extend(self._harvest_page(page, final_url, depth))
         elif resp.is_javascript and self.crawl_js:
             self._queue_js(final_url, resp.text)
@@ -403,31 +433,39 @@ class Crawler:
                         self._js_queue.append(normalize_url(t))
 
     def _crawl_js_bundles(self):
-        """Fetch external JS bundles queued during the HTML crawl and mine them."""
-        pending = []
-        for url, info in list(self.result.js_files.items())[: self.max_js_files]:
-            if not info.length:
-                pending.append(url)
+        """Fetch external JS bundles queued during the HTML crawl and mine them.
+
+        Bundles are independent resources, so they go through the same pool as
+        pages. Sequential fetches cost one full round trip each and made the JS
+        phase the longest part of a crawl on a high-latency target.
+        """
+        pending = [url for url, info in list(self.result.js_files.items())[: self.max_js_files]
+                   if not info.length]
         if not pending:
             return
         self.log.info(f"  fetching {len(pending)} JS bundle(s) for endpoint discovery")
-        for url in pending:
+
+        def fetch(url: str) -> None:
             try:
                 resp = self.http.get(url, headers=self.headers)
             except Exception:
-                continue
+                return
             if resp.status != 200:
-                continue
+                return
             with self._lock:
                 cached = self.result.js_files.get(url)
-                if cached:
-                    body = resp.text
-                    cached.length = len(body)
-                    cached.body = body[:MAX_JS_BODY]
-                    targets = extract_js_urls(body, url)
-                    cached.targets = [t for t in targets if self.scope.allows(t)]
-                    for t in cached.targets:
-                        self._register_url(normalize_url(t))
+                if not cached:
+                    return
+                body = resp.text
+                cached.length = len(body)
+                cached.body = body[:MAX_JS_BODY]
+                targets = extract_js_urls(body, url)
+                cached.targets = [t for t in targets if self.scope.allows(t)]
+                for t in cached.targets:
+                    self._register_url(normalize_url(t))
+
+        with ThreadPoolExecutor(max_workers=min(self.concurrency, len(pending))) as pool:
+            list(pool.map(fetch, pending))
 
     # -- URL registry ------------------------------------------------
     def _register_url(self, url: str, is_seed: bool = False):
@@ -460,3 +498,12 @@ def _title_of(text: str) -> str:
     if not m:
         return ""
     return re.sub(r"\s+", " ", m.group(1)).strip()[:120]
+
+
+def _generator_of(page: ParsedPage) -> str:
+    """``<meta name="generator" content=...>``, the usual CMS disclosure."""
+    for tag, attrs, _pos in page.tags:
+        if tag != "meta" or (attrs.get("name") or "").lower() != "generator":
+            continue
+        return (attrs.get("content") or "").strip()[:120]
+    return ""
