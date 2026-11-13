@@ -43,10 +43,10 @@ Releases before 2.8.0 predate this file; their history is in the git log.
 
 ### Fixed
 
-- Crawling a target that 500s part of its URL space is ~24x faster at the same
-  page count: 18.90 s to 0.79 s over 68 requests, measured by running the 2.8.1
-  tree and this one against the same local server (identical page sets, with
-  the 500s injected deterministically from the request path).
+- Crawling a target that 500s part of its URL space is ~20x faster at the same
+  page count: about 1 s instead of 20 s for 68 pages, measured by running the
+  2.8.1 tree and this one against the same local server (identical page sets,
+  50 ms of fixed latency, a deterministic 15% of URLs answering 500).
 
 ## [2.8.1] - 2026-11-13
 
