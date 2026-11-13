@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=68"]
+# 77 is the first setuptools that understands PEP 639 license expressions and
+# `license-files`, which is how the metadata below states the MIT terms.
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,9 +10,9 @@ dynamic = ["version"]
 description = "Context-aware XSS scanner: crawler, browser verification, mXSS, charset and stored-XSS stages"
 readme = "README.md"
 requires-python = ">=3.9"
-# No license field: the tree does not ship a LICENSE file, so the metadata makes
-# no claim about terms the author has not stated.
-authors = [{ name = "xssmap" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ian Mattas" }]
 keywords = ["security", "xss", "scanner", "pentest", "sarif"]
 classifiers = [
     "Environment :: Console",
@@ -23,6 +25,12 @@ classifiers = [
 # an assessment host without a package install.
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/imattas/xssmap"
+Repository = "https://github.com/imattas/xssmap"
+Changelog = "https://github.com/imattas/xssmap/blob/main/CHANGELOG.md"
+Issues = "https://github.com/imattas/xssmap/issues"
+
 [project.optional-dependencies]
 dev = ["ruff>=0.6", "mypy>=1.10"]
 
@@ -31,6 +39,11 @@ xssmap = "xssmap.cli:main"
 
 [tool.setuptools]
 packages = ["xssmap"]
+
+# PEP 561 marker: tells type checkers the inline annotations are usable and must
+# travel with the installed package, not just the source tree.
+[tool.setuptools.package-data]
+xssmap = ["py.typed"]
 
 [tool.setuptools.dynamic]
 version = { attr = "xssmap.__version__" }

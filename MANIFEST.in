@@ -1,0 +1,4 @@
+# Everything a reader of the sdist needs to audit what changed between releases.
+# LICENSE is already pulled in by PEP 639 `license-files`; README and pyproject
+# are added by setuptools itself.
+include CHANGELOG.md
