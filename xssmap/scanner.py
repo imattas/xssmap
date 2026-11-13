@@ -394,6 +394,11 @@ class Scanner:
         self.skip_points: set[str] = set(skip_points or ())
         self.completed_points: set[str] = set()
         self.resumed_points = 0
+        self._baseline_status_cache: dict[str, int] = {}
+        # One in-flight baseline per request: two parameters of the same URL are
+        # queued next to each other, so without this the workers both miss the
+        # cache and both fetch the same page.
+        self._baseline_inflight: dict[str, threading.Event] = {}
         self.profile_enabled = profile_enabled
         self.mutation_budget = max(0, mutation_budget)
         self.interrupted = False
@@ -544,6 +549,45 @@ class Scanner:
                 self.completed_points.add(key)
         return found
 
+    def _baseline_status(self, req: Request) -> int | None:
+        """Status of a baseline request, cached per method+URL+body.
+
+        A URL with three parameters produces three points whose baseline request
+        is byte-identical, and the engine only reads ``.status`` from it. Bodies
+        are never cached, so this costs a dictionary of integers rather than a
+        copy of every page.
+        """
+        key = f"{req.method} {req.url}\x00{req.body!r}"
+        event: threading.Event
+        with self.lock:
+            cached = self._baseline_status_cache.get(key)
+            if cached is not None:
+                return cached
+            existing = self._baseline_inflight.get(key)
+            owner = existing is None
+            if existing is None:
+                event = threading.Event()
+                self._baseline_inflight[key] = event
+            else:
+                event = existing
+        if not owner:
+            # Another worker is fetching exactly this baseline; its answer is ours.
+            event.wait(getattr(self.http, "timeout", 15.0) + 5.0)
+            with self.lock:
+                return self._baseline_status_cache.get(key)
+        try:
+            status: int | None = self._send(req).status
+        except NetError:
+            status = None
+        with self.lock:
+            if status is not None:
+                if len(self._baseline_status_cache) >= 4096:
+                    self._baseline_status_cache.clear()
+                self._baseline_status_cache[key] = status
+            self._baseline_inflight.pop(key, None)
+        event.set()
+        return status
+
     def _point_key(self, p: InjectionPoint) -> str:
         if isinstance(p, QueryPoint):
             return f"q:{p.url.split('#')[0]}:{p.index}"
@@ -573,21 +617,24 @@ class Scanner:
         else:
             value_original = original
 
-        # 1. baseline with the original value (some apps 500 on empty params)
-        try:
-            baseline = self._send(point.build(value_original))
-        except NetError:
-            baseline = None
+        # 1. baseline with the original value (some apps 500 on empty params).
+        # Only the status is ever consulted, so it is shared between points that
+        # build the identical request -- the second parameter of a URL does not
+        # need its own copy of the same round trip.
+        baseline_status = self._baseline_status(point.build(value_original))
 
         marker = new_marker()
         marker_value = f"{marker}zqx"
         resp = self._send(point.build(marker_value))
-        if baseline is not None and resp.status >= 500 and baseline.status < 500:
-            # parameter breaks the app; try empty string as neutral baseline
-            try:
-                resp = self._send(point.build(marker_value))
-            except NetError:
-                return []
+        # A 500 here where the unmodified URL answered fine means our value broke
+        # the request. The old code answered that by re-sending the identical
+        # probe, which can only reproduce the 500 and costs a round trip; the
+        # error body is analysed below instead, because some applications echo
+        # the value inside their error page.
+        if (self.log and baseline_status is not None and resp.status >= 500
+                and baseline_status < 500):
+            self.log.debug(f"    {point.label()} answers {resp.status} with our value "
+                           f"({baseline_status} unmodified); error body kept")
 
         marker, resp, match = self._settle_probe(point, marker, resp)
         text = resp.text

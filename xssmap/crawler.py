@@ -489,8 +489,12 @@ class Crawler:
                 self.result.param_urls.append(url)
 
     def _finish_param_urls(self):
-        # sort so the shallow/short URLs get scanned first
-        self.result.param_urls.sort(key=lambda u: (len(urllib.parse.urlsplit(u).query), len(u)))
+        # Shallow/short URLs get scanned first. The URL itself is the final key:
+        # without it, ties were broken by crawl completion order, so the same
+        # target produced a different point order (and a different --max-points
+        # cut) on every run.
+        self.result.param_urls.sort(
+            key=lambda u: (len(urllib.parse.urlsplit(u).query), len(u), u))
 
 
 def _title_of(text: str) -> str:

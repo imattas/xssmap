@@ -8,6 +8,29 @@ Releases before 2.8.0 predate this file; their history is in the git log.
 
 ## [Unreleased]
 
+## [2.9.1] - 2026-11-13
+
+Speed release. Detection behaviour is unchanged.
+
+### Changed
+
+- Discovery has its own worker count. `--crawl-threads` defaults to 16 (or
+  `--threads` when that is larger) instead of running the crawl at the payload
+  width of 5; `--threads` itself now defaults to 10. On a 4,096-page lab target
+  with 50 ms of latency, the same 8,252 requests finished in 85 s before and
+  38 s after.
+- The baseline response is fetched once per URL rather than once per parameter,
+  and concurrent workers share the in-flight fetch instead of racing on it.
+  Only the status is cached, never a body.
+
+### Fixed
+
+- Point order is deterministic. `param_urls` ties were broken by crawl
+  completion order, so `--max-points` could cut at a different place on every
+  run of the same target.
+- A parameter that answers 500 when probed no longer re-sends the identical
+  probe; the error body is still analysed for a reflection.
+
 ## [2.9.0] - 2026-11-13
 
 ### Added

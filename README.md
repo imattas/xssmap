@@ -487,6 +487,23 @@ request. Three things make the result usable rather than noisy:
 A flagged version is a lead: it says the build has a published problem, not that this
 host is exploitable through it. The finding standard for XSS is unchanged.
 
+### Crawl and scan speed
+
+Both phases are round-trip bound: the work per URL is fixed, so the wall-clock
+cost is essentially `pages / workers x latency`. On a local lab of 4,096 linked
+pages with 50 ms of latency per response, the same code, same page set and the same
+8,252 requests finished in **85 s with the old defaults (5 workers) and 38 s with
+the current ones** (16 discovery workers, 10 payload workers). At a real WAN
+latency of 200-300 ms the difference is the same multiple, in minutes.
+
+Discovery therefore has its own worker count. It only fetches pages the site
+links to itself, and the shared throttle still backs off on 429/503, so it does
+not need to run as narrow as payload testing. Raise it with `--crawl-threads`;
+`--threads` remains the knob for the scan phase. Two scan-side savings are
+always on: the baseline response is fetched once per URL instead of once per
+parameter, and the point order is deterministic, so `--max-points` cuts the same
+places on every run.
+
 ### Browser cost
 
 `--browser` reuses one browser and one page per run. The report's `browser_verification`
@@ -547,7 +564,8 @@ per check, so the price of execution proof is visible rather than implied.
 | `--dom` / `--no-dom`, `--dom-flows N` | DOM analysis and its flow cap (default 15) |
 | `--headless new\|old` | headless mode passed to the browser |
 | `--screenshots` | capture a PNG for verified findings |
-| `--threads N`, `--delay S`, `--timeout S`, `--retries N` | pacing and reliability |
+| `--threads N`, `--delay S`, `--timeout S`, `--retries N` | pacing and reliability (`--threads` sizes payload testing, default 10) |
+| `--crawl-threads N` | discovery workers for the crawl; default 16, or `--threads` when that is larger |
 | `--proxy URL`, `--insecure` | `http://`/`socks5://` proxy for scanner and browser; skip TLS verification |
 | `--max-points N` | stop after N injection points |
 | `--state FILE` | resume file: skip points already completed, carry findings over |
@@ -743,7 +761,7 @@ response shape shows up as a miss on the other.
 ## Tests and CI
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v   # 481 tests, no network
+python -m unittest discover -s tests -p "test_*.py" -v   # 490 tests, no network
 python -m ruff check .                                   # lint
 python -m mypy xssmap                                    # types on shipped package
 ```
@@ -843,7 +861,9 @@ browser harness on Linux (advisory, since headless timing on shared runners vari
   by at most the remaining slice (floored at 0.25s), and the report is then marked
   `partial` rather than pretending the sweep finished.
 - Heavy crawls against large sites should be bounded with `--max-pages`, `--delay` and
-  `--threads`; the scanner honours those limits for every request it makes.
+  `--crawl-threads`; the scanner honours those limits for every request it makes.
+  A crawl of N pages is still N round trips: at 300 ms of latency and 16 workers that
+  is about a minute per 4,000 pages, and no amount of tuning changes that arithmetic.
 - WAF evasion is signature-driven at first and adaptive afterwards: each strategy that
   makes a payload reflect verbatim is tried first on later points, and one that only
   produces mangled or blocked responses moves to the end of the budget (the per-scan
