@@ -23,7 +23,7 @@ Releases before 2.8.0 predate this file; their history is in the git log.
   8.2 (out of security support) and IIS 6.0-8.5 (shipped only with an
   end-of-life Windows Server). A flagged version is a lead for the operator,
   never a finding on its own.
-- 35 tests pinning the new crawl scheduling, the transport cap, the throttle
+- 36 tests pinning the new crawl scheduling, the transport cap, the throttle
   rules and the stack policy table.
 
 ### Changed
@@ -44,8 +44,9 @@ Releases before 2.8.0 predate this file; their history is in the git log.
 ### Fixed
 
 - Crawling a target that 500s part of its URL space is ~24x faster at the same
-  page count: 18.90 s to 0.79 s for 68 requests in the bundled benchmark
-  (identical page sets, deterministic error injection).
+  page count: 18.90 s to 0.79 s over 68 requests, measured by running the 2.8.1
+  tree and this one against the same local server (identical page sets, with
+  the 500s injected deterministically from the request path).
 
 ## [2.8.1] - 2026-11-13
 

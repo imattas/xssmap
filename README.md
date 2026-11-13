@@ -743,7 +743,7 @@ response shape shows up as a miss on the other.
 ## Tests and CI
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v   # 445 tests, no network
+python -m unittest discover -s tests -p "test_*.py" -v   # 481 tests, no network
 python -m ruff check .                                   # lint
 python -m mypy xssmap                                    # types on shipped package
 ```
