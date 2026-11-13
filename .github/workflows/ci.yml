@@ -27,7 +27,10 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs only for pull requests. On main a run can be inside
+  # the upload step, and killing it halfway leaves a version half-published;
+  # pushes and dispatches therefore queue behind each other instead.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
@@ -138,9 +141,10 @@ jobs:
     needs: [lint, types, units, selftest, browser]
     # A pull request is a proposal, not a release, and fork PRs have no token.
     if: github.event_name != 'pull_request'
-    # The workflow-level group cancels in-flight runs, which is correct for
-    # tests and wrong for an upload: cancelling between build and upload leaves
-    # a half-published release. Queue releases instead of racing them.
+    # Serialise releases on their own group: a push and a manual dispatch (or a
+    # re-run) can both reach this job, and two concurrent uploads of the same
+    # version race each other. Never cancel one mid-upload, or the release is
+    # left half-published.
     concurrency:
       group: pypi-publish
       cancel-in-progress: false
