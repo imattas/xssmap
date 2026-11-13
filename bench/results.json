@@ -1,0 +1,166 @@
+{
+  "generated": "2026-11-13T16:56:34Z",
+  "mode": "reflection",
+  "scanner": [
+    "C:\\Users\\user\\xssmap\\run.py",
+    "-u",
+    "http://127.0.0.1:50989/",
+    "--crawl",
+    "--crawl-depth",
+    "2",
+    "--forms",
+    "--max-pages",
+    "30",
+    "--max-points",
+    "80",
+    "--threads",
+    "4",
+    "--quiet",
+    "--no-color",
+    "--output-dir",
+    "C:\\Users\\user\\AppData\\Local\\Temp\\xssmap-bench-iy9gezp6",
+    "--no-browser"
+  ],
+  "metrics": {
+    "tp": 9,
+    "fp": 0,
+    "fn": 0,
+    "tn": 4,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0
+  },
+  "rows": [
+    {
+      "path": "/quotes",
+      "param": "text",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "html_text",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/avatar",
+      "param": "name",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "attr_double",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/nick",
+      "param": "name",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "attr_single",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/qty",
+      "param": "n",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "attr_unquoted",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/greet",
+      "param": "who",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "js_string_single",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/note",
+      "param": "body",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "textarea",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/headline",
+      "param": "title",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "title",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/debug",
+      "param": "msg",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "comment",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/subscribe",
+      "param": "email",
+      "expected": "vulnerable",
+      "result": "TP",
+      "context": "html_text",
+      "context_ok": true,
+      "confidence": "high",
+      "verify_state": ""
+    },
+    {
+      "path": "/api/echo",
+      "param": "text",
+      "expected": "safe",
+      "result": "TN",
+      "context": "",
+      "context_ok": true,
+      "confidence": "",
+      "verify_state": ""
+    },
+    {
+      "path": "/count",
+      "param": "n",
+      "expected": "safe",
+      "result": "TN",
+      "context": "",
+      "context_ok": true,
+      "confidence": "",
+      "verify_state": ""
+    },
+    {
+      "path": "/escape",
+      "param": "text",
+      "expected": "safe",
+      "result": "TN",
+      "context": "",
+      "context_ok": true,
+      "confidence": "",
+      "verify_state": ""
+    },
+    {
+      "path": "/strip",
+      "param": "text",
+      "expected": "safe",
+      "result": "TN",
+      "context": "",
+      "context_ok": true,
+      "confidence": "",
+      "verify_state": ""
+    }
+  ],
+  "unexpected_findings": []
+}

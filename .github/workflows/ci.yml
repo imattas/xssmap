@@ -1,0 +1,129 @@
+name: ci
+
+# Gates are ordered cheap-to-expensive so a formatting slip fails in seconds
+# instead of after a full harness run.
+#
+# What each job is actually protecting:
+#   lint     - style and dead-code drift (unused imports hide bugs)
+#   types    - the shipped package only; tests and bench fixtures are not typed
+#   units    - the pure logic: verifier tri-state, CSP parser, mXSS round trip,
+#              charset trail bytes, throttle/Retry-After, resume state, report
+#              rendering, SARIF shape
+#   selftest - the end-to-end honesty gate: a scanner that reports "not tested"
+#              as "clean" is worse than one that crashes, so this asserts both
+#              recall on vulnerable routes AND no findings on safe ones
+#   browser  - the same harness with real Chrome behind the DevTools protocol
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff
+        run: python -m pip install --disable-pip-version-check ruff
+      - name: ruff check
+        run: ruff check . --output-format=github
+
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install mypy
+        run: python -m pip install --disable-pip-version-check mypy
+      - name: mypy (package only)
+        # Scope is the shipped package. tests/ and bench/ are fixtures: typing
+        # them would mean scattering ignores through assertions for no gain in
+        # the code users actually run. Settings live in pyproject.toml, so this
+        # command is the same one a contributor runs locally.
+        run: mypy xssmap
+
+  units:
+    name: units (py${{ matrix.python }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 3.9 is the declared floor: it proves the source stays free of
+          # newer syntax that ruff's py39 target alone cannot fully catch.
+          - os: ubuntu-latest
+            python: "3.9"
+          - os: ubuntu-latest
+            python: "3.12"
+          # Windows is the primary operator platform for this tool, and its
+          # path/encoding quirks are where launcher bugs live.
+          - os: windows-latest
+            python: "3.12"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: unit tests
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+      - name: entry point smoke test
+        run: python run.py --version
+
+  selftest:
+    name: selftest, browser-free (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: crawl + forms + stored against the vulnerable lab
+        # No browser needed. Every route with a known-vulnerable sink must be
+        # found, and the safe routes must stay silent.
+        run: python tests/selftest.py --forms --stored
+
+  browser:
+    name: selftest, real browser
+    runs-on: ubuntu-latest
+    # Chrome ships with the ubuntu runner image and is found at
+    # /usr/bin/google-chrome, which is in the candidate list. Kept advisory:
+    # headless timing on shared runners is genuinely variable, and a flaky red
+    # X trains people to ignore CI. Promote to blocking once it has been stable.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: confirm a browser is present
+        run: google-chrome --version
+      - name: full harness with DevTools verification
+        run: python tests/selftest.py --browser --forms --stored
+      - name: upload harness output on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-browser-output
+          path: |
+            *.json
+            *.sarif
+          if-no-files-found: ignore
+          retention-days: 7

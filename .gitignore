@@ -1,0 +1,24 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Build + release artifacts (published as GitHub releases instead)
+build/
+dist/
+*.zip
+
+# Scan output
+xssmap-out/
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db

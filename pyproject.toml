@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xssmap"
+dynamic = ["version"]
+description = "Context-aware XSS scanner: crawler, browser verification, mXSS, charset and stored-XSS stages"
+readme = "README.md"
+requires-python = ">=3.9"
+# No license field: the tree does not ship a LICENSE file, so the metadata makes
+# no claim about terms the author has not stated.
+authors = [{ name = "xssmap" }]
+keywords = ["security", "xss", "scanner", "pentest", "sarif"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+]
+# No runtime dependencies: the scanner is stdlib-only by design so it can run on
+# an assessment host without a package install.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6", "mypy>=1.10"]
+
+[project.scripts]
+xssmap = "xssmap.cli:main"
+
+[tool.setuptools]
+packages = ["xssmap"]
+
+[tool.setuptools.dynamic]
+version = { attr = "xssmap.__version__" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = [".ruff_cache", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+# SIM108 (ternary) and the ambiguous-unicode family fight readable security code:
+# long "if blocked: note this" branches read better than nested ternaries, and the
+# scanner intentionally handles payload characters that look like other glyphs.
+# E731: the only lambdas bound to names are late-binding CSRF token fetchers; a
+# def would either capture the wrong loop value or need a factory for one line.
+# SIM105: an explicit try/except/pass with a comment says *why* a failure is
+# ignored; contextlib.suppress hides the reason and swallows the traceback text.
+# RUF005: list concatenation is clearer than unpacking when composing payload sets.
+ignore = ["SIM108", "RUF001", "RUF002", "RUF003", "E731", "SIM105", "RUF005"]
+
+[tool.ruff.lint.per-file-ignores]
+# exploit.py builds JavaScript with %-formatting on purpose: every payload is a
+# function body full of `{`/`}` object literals, which f-strings would try to
+# interpolate and .format() would need escaped beyond readability.
+"xssmap/exploit.py" = ["UP031"]
+# Tests and bench fixtures deliberately use broad asserts and mutable defaults.
+"tests/*" = ["B011", "SIM105", "RUF012"]
+"bench/*" = ["B008"]
+
+# The project runs on 3.9+, but current mypy releases refuse to model below 3.10.
+# 3.10 is therefore the closest supported floor; ruff's target-version = "py39"
+# is what actually keeps 3.9-incompatible syntax out of the source.
+[tool.mypy]
+python_version = "3.10"
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+exclude = ["bench/lab2/app\\.py"]
