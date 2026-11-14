@@ -84,6 +84,54 @@ class BaselineSharingTest(unittest.TestCase):
                         "response bodies must not be kept alive by the cache")
 
 
+class ProfileSharingTest(unittest.TestCase):
+    """Two URLs that differ only in a parameter value hit the same handler.
+
+    The filter profile costs two requests, and it was cached per exact URL, so
+    every value variant measured the same endpoint again. The cache is now also
+    keyed by endpoint + parameter + reflection context; deferred payloads stay
+    in the ladder, so sharing can only reorder work, never drop it.
+    """
+
+    def _scan(self):
+        http = _CountingHTTP()
+        scan = scanner.Scanner(http=http, browser=None)
+        return http, scan
+
+    @staticmethod
+    def _point(url):
+        return _points(url)[0]
+
+    def test_value_variants_share_one_profile(self):
+        http, scan = self._scan()
+        scan._profile_point(self._point("https://t.example/search?q=1"), "m", "html_text")
+        after_first = len(http.requests)
+        self.assertEqual(after_first, 2, "a profile is a char probe plus a keyword probe")
+        scan._profile_point(self._point("https://t.example/search?q=2"), "m", "html_text")
+        self.assertEqual(len(http.requests), after_first,
+                         "the second value variant must reuse the measurement")
+
+    def test_different_context_still_probes(self):
+        # Escaping is applied by the sink, so a different reflection context is
+        # a different measurement.
+        http, scan = self._scan()
+        scan._profile_point(self._point("https://t.example/search?q=1"), "m", "html_text")
+        scan._profile_point(self._point("https://t.example/search?q=2"), "m", "attr_double")
+        self.assertEqual(len(http.requests), 4)
+
+    def test_different_parameters_still_probe_separately(self):
+        http, scan = self._scan()
+        scan._profile_point(self._point("https://t.example/search?q=1"), "m", "html_text")
+        scan._profile_point(self._point("https://t.example/search?page=2"), "m", "html_text")
+        self.assertEqual(len(http.requests), 4)
+
+    def test_different_paths_still_probe_separately(self):
+        http, scan = self._scan()
+        scan._profile_point(self._point("https://t.example/a?q=1"), "m", "html_text")
+        scan._profile_point(self._point("https://t.example/b?q=1"), "m", "html_text")
+        self.assertEqual(len(http.requests), 4)
+
+
 class CrawlWorkerTest(unittest.TestCase):
     def _args(self, argv):
         parser = cli.build_parser()
@@ -108,6 +156,14 @@ class CrawlWorkerTest(unittest.TestCase):
     def test_autonomous_keeps_the_wider_discovery_default(self):
         args = self._args(["--domain", "example.com", "--autonomous"])
         self.assertGreaterEqual(args.crawl_threads, 16)
+
+    def test_fast_preset_is_overridden_by_explicit_depth(self):
+        args = self._args(["-u", "https://t.example/", "--fast", "--depth", "4"])
+        explicit = cli.explicit_dests(cli.build_parser(),
+                                      ["-u", "https://t.example/", "--fast", "--depth", "4"])
+        cli.apply_preset(args, explicit, cli.FAST_DEFAULTS)
+        self.assertEqual(args.crawl_depth, 4)
+        self.assertEqual(args.max_points, cli.FAST_DEFAULTS["max_points"])
 
 
 if __name__ == "__main__":

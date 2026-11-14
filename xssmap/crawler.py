@@ -10,8 +10,10 @@ Discovers:
 """
 from __future__ import annotations
 
+import gzip
 import re
 import threading
+import time
 import urllib.parse
 import urllib.robotparser
 from collections import deque
@@ -30,6 +32,16 @@ from .htmlparse import (
 )
 
 MAX_JS_BODY = 512_000   # analyse slices this large; keeps memory bounded on huge bundles
+
+# Sitemaps are the cheapest breadth a crawl can buy: one document can name every
+# page on the site, where walking links costs a round trip per page. They are
+# followed as a bounded tree because <sitemapindex> nests.
+MAX_SITEMAP_FILES = 200     # sitemap files fetched per crawl (indexes included)
+MAX_SITEMAP_URLS = 5_000    # <loc> entries registered from a single sitemap file
+MAX_ROBOTS_SITEMAPS = 10    # Sitemap: lines honoured from robots.txt
+SITEMAP_INDEX_DEPTH = 2     # sitemap.xml -> child index -> leaf sitemap
+SITEMAP_WORKERS = 8         # sitemap files fetched at once
+CRAWL_REPORT_EVERY = 2.0    # seconds between crawl progress lines
 
 # <script> types that are not executable code: state blobs, import maps and
 # client-side templates. Feeding them to the taint pass only adds noise.
@@ -162,7 +174,8 @@ class Crawler:
                  concurrency: int = 4, exclude: list[str] | None = None,
                  include: list[str] | None = None, crawl_js: bool = True,
                  crawl_forms: bool = True, ajax: bool = True, respect_robots: bool = False,
-                 max_js_files: int = 25, headers: list[tuple[str, str]] | None = None):
+                 max_js_files: int = 25, headers: list[tuple[str, str]] | None = None,
+                 variants: int = 3):
         self.http = http
         self.scope = scope
         self.log = log
@@ -174,6 +187,10 @@ class Crawler:
         self.crawl_js = crawl_js
         self.crawl_forms = crawl_forms
         self.ajax = ajax
+        # How many value variants of one signature (?id=1, ?id=2, ...) to keep.
+        # Three is enough to catch per-value behaviour without scanning a whole
+        # id space; --url-variants raises it when a target needs the full set.
+        self.variants = max(1, variants)
         self.respect_robots = respect_robots
         self.max_js_files = max_js_files
         self.headers = headers or []
@@ -186,6 +203,7 @@ class Crawler:
         self._js_queue: list[str] = []
         self._js_owners: dict[str, list[str]] = {}
         self._param_keys: dict[str, int] = {}
+        self._sitemaps_seen: set[str] = set()
         self._fetched = 0
 
     # -- filters -----------------------------------------------------
@@ -223,6 +241,8 @@ class Crawler:
         pending: deque[tuple[str, int]] = deque((u, 0) for u in seeds)
         self.log.info(f"  crawl start: {len(pending)} seed(s), depth {self.max_depth}, "
                       f"{self.concurrency} worker(s), max {self.max_pages} page(s)")
+        started = time.monotonic()
+        last_report = started
         with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
             futures: dict = {}
             while pending or futures:
@@ -249,11 +269,29 @@ class Crawler:
                         continue
                     if depth < self.max_depth:
                         pending.extend((u, depth + 1) for u in found if u not in self._seen)
-        self.log.info(f"  crawl stopped: {self._fetched} page(s) fetched, "
+                now = time.monotonic()
+                if now - last_report >= CRAWL_REPORT_EVERY:
+                    last_report = now
+                    self._report_progress(now - started)
+        elapsed = time.monotonic() - started
+        rate = self._fetched / elapsed if elapsed > 0 else 0.0
+        self.log.info(f"  crawl stopped: {self._fetched} page(s) in {elapsed:.1f}s "
+                      f"({rate:.1f} page/s), {len(self.result.param_urls)} param URL(s), "
                       f"{len(self.result.errors)} error(s)")
         self._crawl_js_bundles()
         self._finish_param_urls()
         return self.result
+
+    def _report_progress(self, elapsed: float):
+        """One line every few seconds: a long crawl must not look hung."""
+        if elapsed <= 0:
+            return
+        rate = self._fetched / elapsed
+        left = max(0, self.max_pages - self._fetched)
+        eta = f", eta {left / rate:.0f}s" if rate > 0 and left else ""
+        self.log.info(f"  crawl: {self._fetched}/{self.max_pages} page(s), "
+                      f"{len(self.result.param_urls)} param URL(s), "
+                      f"{rate:.1f} page/s{eta}")
 
     def _add_seed_urls(self, seeds: list[str]):
         for u in seeds:
@@ -277,33 +315,104 @@ class Crawler:
                 rp.parse(text.splitlines())
                 self.robots = rp
                 sitemaps = re.findall(r"(?im)^\s*sitemap:\s*(\S+)", text)
-                for sm in sitemaps[:5]:
-                    self._ingest_sitemap(sm)
+                if sitemaps:
+                    # A robots.txt usually lists every child of a sitemap index,
+                    # so following it is the whole discovery step for many sites:
+                    # thousands of URLs for a handful of requests, no link crawl.
+                    self._ingest_sitemaps(sitemaps[:MAX_ROBOTS_SITEMAPS])
         except Exception:
             pass
         try:
             resp = f_map.result()
-            if resp.status == 200 and ("xml" in (resp.content_type or "") or resp.text.lstrip().startswith("<?xml")):
-                self._ingest_sitemap_xml(resp.text)
+            # robots.txt normally names the same file; parsing it twice would
+            # log the same thousands of URLs twice for no gain.
+            if (resp.status == 200
+                    and ("xml" in (resp.content_type or "") or not resp.is_html)
+                    and root + "/sitemap.xml" not in self._sitemaps_seen):
+                children = self._ingest_sitemap_text(self._sitemap_text(resp),
+                                                     root + "/sitemap.xml")
+                if children:
+                    self._ingest_sitemaps(children)
         except Exception:
             pass
 
-    def _ingest_sitemap(self, url: str):
+    # -- sitemaps ----------------------------------------------------
+    @staticmethod
+    def _sitemap_text(resp) -> str:
+        """Decode a sitemap body, including the .xml.gz variant search engines allow."""
+        body = resp.body or b""
+        if body[:2] == b"\x1f\x8b":
+            try:
+                body = gzip.decompress(body)
+            except (OSError, EOFError):
+                return ""
+        if isinstance(body, (bytes, bytearray)):
+            return bytes(body).decode("utf-8", "replace")
+        return str(body)
+
+    @staticmethod
+    def _looks_like_sitemap(url: str) -> bool:
+        path = urllib.parse.urlsplit(url).path.lower()
+        return path.endswith((".xml", ".xml.gz")) or "sitemap" in path
+
+    def _claim_sitemap(self, url: str) -> bool:
+        """Reserve one sitemap file so it is fetched once, up to the global cap."""
+        with self._lock:
+            if url in self._sitemaps_seen or len(self._sitemaps_seen) >= MAX_SITEMAP_FILES:
+                return False
+            self._sitemaps_seen.add(url)
+            return True
+
+    def _ingest_sitemaps(self, urls: list[str], depth: int = 0):
+        """Fetch sitemap files level by level, following <sitemapindex> children.
+
+        Sitemaps buy breadth with almost no requests: one document can name every
+        page on the site, where walking links costs a round trip per page. Index
+        files nest (index -> index -> urlset), so they are followed breadth-first
+        with a depth and a file cap instead of recursing without bound.
+        """
+        before = len(self._sitemaps_seen)
+        frontier = [u for u in dict.fromkeys(urls)
+                    if self.scope.allows(u) and self._claim_sitemap(u)]
+        while frontier:
+            children: list[str] = []
+            with ThreadPoolExecutor(max_workers=min(SITEMAP_WORKERS, len(frontier))) as pool:
+                for kids in pool.map(self._fetch_sitemap, frontier):
+                    children.extend(kids)
+            if depth >= SITEMAP_INDEX_DEPTH:
+                break
+            depth += 1
+            frontier = [u for u in dict.fromkeys(children)
+                        if self.scope.allows(u) and self._claim_sitemap(u)]
+        if len(self._sitemaps_seen) > before:
+            self.log.info(f"  sitemaps: {len(self._sitemaps_seen)} file(s), "
+                          f"{len(self.result.sitemap_urls)} URL(s)")
+
+    def _fetch_sitemap(self, url: str) -> list[str]:
         try:
             resp = self.http.get(url, headers=self.headers)
         except Exception:
-            return
-        if resp.status == 200:
-            self._ingest_sitemap_xml(resp.text, sitemap_url=url)
+            return []
+        if resp.status != 200:
+            return []
+        return self._ingest_sitemap_text(self._sitemap_text(resp), sitemap_url=url)
 
-    def _ingest_sitemap_xml(self, text: str, sitemap_url: str = ""):
-        locs = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", text, re.I)
-        for loc in locs[:400]:
-            loc = loc.strip().replace("&amp;", "&")
-            if loc.endswith(".xml") and ("sitemap" in loc.lower()):
-                continue
-            self.result.sitemap_urls.append(loc)
+    def _ingest_sitemap_text(self, text: str, sitemap_url: str = "") -> list[str]:
+        """Register <loc> URLs; return child sitemaps when this file is an index."""
+        if not text:
+            return []
+        head = text[:4000].lower()
+        locs = [loc.strip().replace("&amp;", "&")
+                for loc in re.findall(r"<loc>\s*([^<]+?)\s*</loc>", text, re.I)]
+        if "<sitemapindex" in head or ("<urlset" not in head
+                                       and "sitemap" in sitemap_url.lower()):
+            # An index names more sitemaps; anything else in it is not a page.
+            return [loc for loc in locs if self._looks_like_sitemap(loc)]
+        for loc in locs[:MAX_SITEMAP_URLS]:
+            if len(self.result.sitemap_urls) < MAX_SITEMAP_URLS:
+                self.result.sitemap_urls.append(loc)
             self._register_url(normalize_url(loc))
+        return []
 
     # -- fetching ----------------------------------------------------
     def _fetch_and_parse(self, url: str, depth: int) -> list[str]:
@@ -481,8 +590,8 @@ class Crawler:
         key = dedupe_key(url)
         with self._lock:
             count = self._param_keys.get(key, 0)
-            # keep up to 3 value variants per signature (ids/pages) and all seeds
-            if count >= 3 and not is_seed:
+            # keep a few value variants per signature (ids/pages) and all seeds
+            if count >= self.variants and not is_seed:
                 return
             self._param_keys[key] = count + 1
             if url not in self.result.param_urls:

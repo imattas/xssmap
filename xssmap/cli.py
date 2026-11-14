@@ -100,6 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     auto.add_argument("--max-minutes", type=float, default=0.0, metavar="N",
                       help="wall-clock budget in minutes, enforced between phases and "
                            "inside the scan/stored loops (0 = unlimited; --autonomous 30)")
+    auto.add_argument("--fast", action="store_true",
+                      help="triage preset: depth 1, 60 pages, 300 points, no JS mining, "
+                           "no browser stages (explicit flags always win)")
 
     crawl = p.add_argument_group("crawling")
     crawl.add_argument("--crawl", dest="crawl", action="store_true", default=None,
@@ -363,10 +366,24 @@ def option_flags(parser: argparse.ArgumentParser) -> dict[str, str]:
             for action in parser._actions if action.option_strings}
 
 
-def apply_autonomous(args: argparse.Namespace, explicit: set[str]) -> list[str]:
-    """Apply the autonomous defaults, keeping every explicit choice."""
+# What --fast turns on: the cheap path to a first answer. A shallow crawl and a
+# capped point budget still find reflected XSS; the expensive stages (JS bundle
+# mining, DOM and browser runs) are what a triage pass can afford to skip.
+FAST_DEFAULTS: dict[str, object] = {
+    "crawl_depth": 1,
+    "max_pages": 60,
+    "max_points": 300,
+    "no_js": True,
+    "dom": False,
+    "browser": False,
+}
+
+
+def apply_preset(args: argparse.Namespace, explicit: set[str],
+                 defaults: dict[str, object]) -> list[str]:
+    """Apply a preset, keeping every choice the user typed themselves."""
     applied: list[str] = []
-    for dest, value in AUTONOMOUS_DEFAULTS.items():
+    for dest, value in defaults.items():
         if dest in explicit:
             continue
         off = _NEGATED.get(dest)
@@ -377,6 +394,11 @@ def apply_autonomous(args: argparse.Namespace, explicit: set[str]) -> list[str]:
         setattr(args, dest, value)
         applied.append(dest)
     return applied
+
+
+def apply_autonomous(args: argparse.Namespace, explicit: set[str]) -> list[str]:
+    """Apply the autonomous defaults, keeping every explicit choice."""
+    return apply_preset(args, explicit, AUTONOMOUS_DEFAULTS)
 
 
 def finalize_args(args: argparse.Namespace) -> None:
@@ -557,6 +579,11 @@ def main(argv=None) -> int:
         print_payload_catalogue(log)
         return 0
 
+    if args.fast:
+        applied = apply_preset(args, explicit, FAST_DEFAULTS)
+        if applied:
+            log.action("fast: " + ", ".join(
+                f"{dest}={FAST_DEFAULTS[dest]}" for dest in applied))
     if args.autonomous:
         applied = apply_autonomous(args, explicit)
         if applied:

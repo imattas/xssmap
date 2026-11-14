@@ -7,8 +7,9 @@ actually execute in a real browser.
 
 - **Zero dependencies.** Pure Python 3.9+ standard library (no requests, no BeautifulSoup,
   no Playwright, no Node). Drop the folder anywhere and run it.
-- **Crawler included.** Bounded BFS, robots.txt and sitemap seeding, forms, inline and
-  external JavaScript endpoint extraction, JSON/AJAX hints, scope and exclusion rules.
+- **Crawler included.** Bounded BFS, robots.txt and sitemap seeding (indexes are
+  followed, gzip and nested files included), forms, inline and external JavaScript
+  endpoint extraction, JSON/AJAX hints, scope and exclusion rules.
 - **Context-aware payloads.** HTML text, double/single/unquoted attributes, URL
   attributes, JS string (double/single/template), JS code, `<script>` data blocks,
   comments, `<textarea>`/`<title>`/`<style>` RCDATA, tag space.
@@ -496,6 +497,15 @@ pages with 50 ms of latency per response, the same code, same page set and the s
 the current ones** (16 discovery workers, 10 payload workers). At a real WAN
 latency of 200-300 ms the difference is the same multiple, in minutes.
 
+A crawl does not have to walk every link to learn every URL. When a site publishes
+sitemaps, the crawl reads them first: on a 4,096-URL lab, one sitemap index plus
+its 8 children produced **4,096 parameterised URLs from 21 requests in 0.2 s**,
+where the same site crawled link by link exposed 1. Index files are followed as a
+bounded tree (depth 2, 200 files, 8 in flight), `.xml.gz` bodies are decoded, and
+`Sitemap:` lines in robots.txt count as a starting point. `--url-variants N`
+controls how many value variants of one signature survive that pass (default 3),
+so an id space can be widened or trimmed deliberately.
+
 Discovery therefore has its own worker count. It only fetches pages the site
 links to itself, and the shared throttle still backs off on 429/503, so it does
 not need to run as narrow as payload testing. Raise it with `--crawl-threads`;
@@ -520,6 +530,8 @@ per check, so the price of execution proof is visible rather than implied.
 | `--crawl` / `--no-crawl` | force crawling on or off (crawl is on by default) |
 | `--crawl-depth N`, `--depth N` | BFS depth (default 2) |
 | `--max-pages N` | page cap for the crawl, shared across hosts (default 150) |
+| `--url-variants N` | value variants kept per URL signature from the crawl (default 3) |
+| `--fast` | shallow preset: depth 1, 60 pages, 300 points, no JS, no browser; explicit flags still win |
 | `--scope {host,subdomain,any}` | how far the crawler may wander |
 | `--subdomains` | discover subdomains via CT + DNS and crawl them too |
 | `--no-subdomain-brute` | passive CT only, no DNS wordlist sweep |
@@ -761,7 +773,7 @@ response shape shows up as a miss on the other.
 ## Tests and CI
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v   # 490 tests, no network
+python -m unittest discover -s tests -p "test_*.py" -v   # 507 tests, no network
 python -m ruff check .                                   # lint
 python -m mypy xssmap                                    # types on shipped package
 ```
@@ -783,9 +795,11 @@ transport deadline clip, and the bench ground truth.
 next to the rule they silence rather than in a bare list. mypy is scoped to `xssmap/`
 (the code users run) and does not cover `tests/` or `bench/` fixtures.
 
-`.github/workflows/ci.yml` runs five jobs: lint, types, units on a
-3.9/3.12/Windows matrix, the browser-free selftest on Linux and Windows, and the full
-browser harness on Linux (advisory, since headless timing on shared runners varies).
+`.github/workflows/ci.yml` runs six jobs: lint, types, units on a
+3.9/3.12/Windows matrix, the browser-free selftest on Linux and Windows, the full
+browser harness on Linux (advisory, since headless timing on shared runners varies),
+and a `publish` job that builds the sdist and wheel and uploads both to PyPI once
+every other job has passed on a non-PR run.
 
 ## Limitations
 

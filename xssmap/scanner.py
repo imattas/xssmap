@@ -672,7 +672,8 @@ class Scanner:
                                f"(inferred from position; {match.describe()})")
 
         encoding = self._encoding_profile(text, marker)
-        profile = self._profile_point(point, marker)
+        profile = self._profile_point(
+            point, marker, context=primary.context if primary is not None else "")
         findings: list[Finding] = []
         tried_contexts: set[str] = set()
         # A mangled probe means a crafted payload will be mangled too, so the
@@ -1302,18 +1303,48 @@ class Scanner:
         survived = [c for c in probe if c in injected]
         return f"raw x{raw}" + (f" (chars {survived})" if survived else "")
 
-    def _profile_point(self, point: InjectionPoint, marker: str) -> FilterProfile:
-        """Measure what survives this parameter (cached per point)."""
+    def _profile_family(self, point: InjectionPoint, context: str) -> str:
+        """Key that makes equal endpoints share one measured filter profile.
+
+        Two URLs that differ only in a parameter *value* land on the same handler
+        and filter identically, so making the second one pay for the same two
+        probes is pure waste. The reflection context is part of the key because
+        escaping comes from the sink, not from the parameter.
+        """
+        if isinstance(point, QueryPoint):
+            parts = urllib.parse.urlsplit(point.url)
+            return f"qf:{parts.netloc}{parts.path}|{point.name}|{context}"
+        if isinstance(point, FormPoint):
+            return f"ff:{point.form.action}|{point.name}|{context}"
+        return ""
+
+    def _profile_point(self, point: InjectionPoint, marker: str,
+                       context: str = "") -> FilterProfile:
+        """Measure what survives this parameter, cached per point and per endpoint.
+
+        The cache was per exact URL, which still charged every value variant of
+        one parameter (``?id=1``, ``?id=2``) two requests each. Sibling variants
+        now inherit the measurement; deferred payloads are still sent, so a
+        shared profile can only reorder the ladder, never drop a payload.
+        """
         if not self.profile_enabled:
             return FilterProfile()
         key = self._point_key(point)
+        family = self._profile_family(point, context)
         with self.lock:
             cached = self._profiles.get(key)
+            if cached is None and family:
+                cached = self._profiles.get(family)
         if cached is not None:
+            if family:
+                with self.lock:
+                    self._profiles.setdefault(key, cached)
             return cached
         profile = build_profile(lambda value: self._send(point.build(value)), marker, self.log)
         with self.lock:
             self._profiles[key] = profile
+            if family:
+                self._profiles.setdefault(family, profile)
         if self.log and profile.known:
             self.log.debug(f"    {profile.summary()} [{point.label()}]")
         return profile

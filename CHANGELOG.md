@@ -8,6 +8,41 @@ Releases before 2.8.0 predate this file; their history is in the git log.
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-11-14
+
+Discovery release. Detection behaviour is unchanged; what changed is how much
+of a site gets found and how often the same shape is probed twice.
+
+### Added
+
+- Sitemap indexes are followed. A `<sitemapindex>` names more sitemaps, which is
+  how most large sites publish their URL set, and it used to be skipped outright
+  because the child files end in `.xml`. Indexes are now walked breadth-first
+  with a depth cap of 2, at most 200 files and 8 files in flight, gzipped
+  `.xml.gz` bodies are decoded, `&amp;` in `<loc>` is unescaped and every
+  `Sitemap:` line in robots.txt is honoured (up to 10). On a 4,096-URL lab the
+  crawl reached 4,096 parameterised URLs with 21 requests in 0.2 s; the same
+  site crawled link by link exposed 1.
+- `--url-variants N` (default 3) controls how many value variants of one
+  signature (`?id=1`, `?id=2`, ...) are kept from a crawl. It is the knob to
+  turn up when an id space has to be covered, and down when it does not.
+- `--fast` applies a shallow preset (depth 1, 60 pages, 300 points, no JS, no
+  browser) for a quick pass; flags given explicitly on the command line still
+  win over the preset.
+- Response profiles are shared across points that agree on method, host, path,
+  parameter and context, so a catalogue of 4,000 ids sharing one template does
+  not derive the same profile 4,000 times.
+
+### Changed
+
+- robots.txt and `/sitemap.xml` are requested at the same time instead of one
+  after the other, and the root sitemap is not parsed twice when robots.txt
+  already named it.
+- The sitemap summary is printed once per crawl rather than once per ingestion
+  path.
+- The crawl logs pages per second every two seconds, so a long crawl reports
+  progress instead of finishing silently.
+
 ## [2.9.1] - 2026-11-13
 
 Speed release. Detection behaviour is unchanged.
